@@ -37,20 +37,80 @@ class R2Score(tf.keras.metrics.Metric):
         self.sse.assign(0.0)
         self.sst.assign(0.0)
 
-def create_multitask_model(input_dim):
-    inputs = tf.keras.Input(shape=(None,), dtype=tf.int32, name="input_ids")
-    x = tf.keras.layers.Embedding(input_dim=input_dim, output_dim=128)(inputs)
-    x = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64, return_sequences=True))(x)
-    x = tf.keras.layers.GlobalMaxPooling1D()(x)
-    x = tf.keras.layers.Dense(64, activation='relu')(x)
+class F1Score(tf.keras.metrics.Metric):
+    def __init__(self, name='f1_score', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.tp = self.add_weight(name='tp', initializer='zeros')
+        self.fp = self.add_weight(name='fp', initializer='zeros')
+        self.fn = self.add_weight(name='fn', initializer='zeros')
 
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_pred = tf.cast(tf.greater(y_pred, 0.5), tf.float32)
+        y_true = tf.cast(y_true, tf.float32)
+
+        self.tp.assign_add(tf.reduce_sum(y_true * y_pred))
+        self.fp.assign_add(tf.reduce_sum((1 - y_true) * y_pred))
+        self.fn.assign_add(tf.reduce_sum(y_true * (1 - y_pred)))
+
+    def result(self):
+        precision = self.tp / (self.tp + self.fp + tf.keras.backend.epsilon())
+        recall = self.tp / (self.tp + self.fn + tf.keras.backend.epsilon())
+        return 2 * (precision * recall) / (precision + recall + tf.keras.backend.epsilon())
+
+    def reset_states(self):
+        self.tp.assign(0.0)
+        self.fp.assign(0.0)
+        self.fn.assign(0.0)
+
+
+# def create_multitask_model(input_dim):
+#     inputs = tf.keras.Input(shape=(None,), dtype=tf.int32, name="input_ids")
+#     x = tf.keras.layers.Embedding(input_dim=input_dim, output_dim=128)(inputs)
+#     x = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64, return_sequences=True))(x)
+#     x = tf.keras.layers.GlobalMaxPooling1D()(x)
+#     x = tf.keras.layers.Dense(64, activation='relu')(x)
+
+#     deception_score = tf.keras.layers.Dense(1, activation='sigmoid', name="deception_score")(x)
+#     deception_class = tf.keras.layers.Dense(1, activation='sigmoid', name="deception")(x)
+
+#     return tf.keras.Model(inputs=inputs, outputs={
+#         "deception_score": deception_score,
+#         "deception": deception_class
+#     })
+def create_multitask_model(input_dim):
+    # Input layer
+    inputs = tf.keras.Input(shape=(None,), dtype=tf.int32, name="input_ids")
+
+    # Embedding layer
+    x = tf.keras.layers.Embedding(input_dim=input_dim, output_dim=128)(inputs)
+
+    # First Conv1D + Pooling
+    x = tf.keras.layers.Conv1D(filters=64, kernel_size=5, activation='relu', padding='same')(x)
+    x = tf.keras.layers.MaxPooling1D(pool_size=2)(x)
+
+    # Second Conv1D + Pooling
+    x = tf.keras.layers.Conv1D(filters=64, kernel_size=3, activation='relu', padding='same')(x)
+    x = tf.keras.layers.MaxPooling1D(pool_size=2)(x)
+
+    # Global pooling to flatten
+    x = tf.keras.layers.GlobalMaxPooling1D()(x)
+
+    # Fully connected layer
+    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+
+    # Outputs
     deception_score = tf.keras.layers.Dense(1, activation='sigmoid', name="deception_score")(x)
     deception_class = tf.keras.layers.Dense(1, activation='sigmoid', name="deception")(x)
 
-    return tf.keras.Model(inputs=inputs, outputs={
+    # Build model
+    model = tf.keras.Model(inputs=inputs, outputs={
         "deception_score": deception_score,
         "deception": deception_class
     })
+
+    return model
+
 
 def train(model_path=model_path, train_path=train_path, dev_path=dev_path):
     hf_dataset = datasets.load_dataset("csv", data_files={
@@ -87,7 +147,7 @@ def train(model_path=model_path, train_path=train_path, dev_path=dev_path):
         },
         metrics={
             "deception_score": [tf.keras.metrics.MeanAbsoluteError(), R2Score()],
-            "deception": [tf.keras.metrics.BinaryAccuracy()]
+            "deception": [tf.keras.metrics.BinaryAccuracy(),  F1Score(name="f1_score")]
         }
     )
 
@@ -105,30 +165,36 @@ def train(model_path=model_path, train_path=train_path, dev_path=dev_path):
     )
 
     def plot_training_history(history):
-        # Plot deception_score loss
-        plt.figure(figsize=(12, 5))
+
+        epochs = range(1, len(history.history["loss"]) + 1)
+
+        # --- REGRESSION METRICS ---
+        plt.figure(figsize=(14, 6))
 
         plt.subplot(1, 2, 1)
-        plt.plot(history.history["deception_score_loss"], label="Train Deception Score Loss")
-        plt.plot(history.history["val_deception_score_loss"], label="Val Deception Score Loss")
-        plt.title("Deception Score Loss")
+        plt.plot(epochs, history.history["val_deception_score_loss"], label="Val MSE")
+        plt.plot(epochs, history.history["val_deception_score_r2_score"], label="Val R²")
+        plt.title("Regression Metrics (Validation)")
         plt.xlabel("Epochs")
-        plt.ylabel("Loss")
+        plt.ylabel("Value")
         plt.legend()
 
-        # Plot deception classification accuracy
+        # --- CLASSIFICATION METRICS ---
         plt.subplot(1, 2, 2)
-        plt.plot(history.history["deception_binary_accuracy"], label="Train Accuracy")
-        plt.plot(history.history["val_deception_binary_accuracy"], label="Val Accuracy")
-        plt.title("Deception Classification Accuracy")
+        plt.plot(epochs, history.history["val_deception_binary_accuracy"], label="Val Accuracy")
+        if "val_deception_f1_score" in history.history:
+            plt.plot(epochs, history.history["val_deception_f1_score"], label="Val F1 Score")
+        plt.title("Classification Metrics (Validation)")
         plt.xlabel("Epochs")
-        plt.ylabel("Accuracy")
+        plt.ylabel("Value")
         plt.legend()
 
         plt.tight_layout()
         plt.show()
 
     plot_training_history(history)
+
+
 
 
 
