@@ -4,6 +4,7 @@ import pandas
 import transformers
 import tensorflow as tf
 import numpy
+import matplotlib.pyplot as plt
 
 model_path = "./files/model/model.h5"
 train_path = "./files/data/train.csv"
@@ -90,7 +91,7 @@ def train(model_path=model_path, train_path=train_path, dev_path=dev_path):
         }
     )
 
-    model.fit(
+    history = model.fit(
         train_dataset,
         epochs=10,
         validation_data=dev_dataset,
@@ -102,6 +103,34 @@ def train(model_path=model_path, train_path=train_path, dev_path=dev_path):
                 save_best_only=True)
         ]
     )
+
+    def plot_training_history(history):
+        # Plot deception_score loss
+        plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 2, 1)
+        plt.plot(history.history["deception_score_loss"], label="Train Deception Score Loss")
+        plt.plot(history.history["val_deception_score_loss"], label="Val Deception Score Loss")
+        plt.title("Deception Score Loss")
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.legend()
+
+        # Plot deception classification accuracy
+        plt.subplot(1, 2, 2)
+        plt.plot(history.history["deception_binary_accuracy"], label="Train Accuracy")
+        plt.plot(history.history["val_deception_binary_accuracy"], label="Val Accuracy")
+        plt.title("Deception Classification Accuracy")
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    plot_training_history(history)
+
+
 
 def predict(model_path=model_path, input_path=test_path):
     model = tf.keras.models.load_model(model_path, custom_objects={"R2Score": R2Score})
@@ -119,6 +148,7 @@ def predict(model_path=model_path, input_path=test_path):
     df["Deception"] = (predictions["deception"].flatten() > 0.5).astype(int)
 
     df.to_csv(output_path, index=False)
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
